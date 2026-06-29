@@ -1,15 +1,14 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use zbus::Connection;
 
 use crate::error::Error;
+use crate::names::{INTERFACE, OBJECT_PATH, PROGRESS_SIGNAL};
 
 const STORE_PREFIX: &str = "/nix/store/";
 const SYSTEM_PROFILE: &str = "/nix/var/nix/profiles/system";
-const OBJECT_PATH: &str = "/systems/staticroot/Trigger";
-const INTERFACE: &str = "systems.staticroot.Trigger";
 
 /// Reject anything that isn't a plausible top-level store path before touching
 /// the filesystem. Kept pure so it is unit-testable off-Linux.
@@ -48,7 +47,7 @@ fn emit_progress(conn: &Connection, line: &str) {
         None::<&str>,
         OBJECT_PATH,
         INTERFACE,
-        "Progress",
+        PROGRESS_SIGNAL,
         &(line,),
     ));
 }
@@ -62,6 +61,15 @@ fn run_streaming(mut cmd: Command, conn: &Connection) -> Result<(), Error> {
         .spawn()
         .map_err(|e| Error::ActivationFailed(e.to_string()))?;
 
+    let stderr = child.stderr.take();
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut err) = stderr {
+            let _ = err.read_to_string(&mut buf);
+        }
+        buf
+    });
+
     if let Some(out) = child.stdout.take() {
         for line in BufReader::new(out).lines().map_while(Result::ok) {
             emit_progress(conn, &line);
@@ -69,10 +77,10 @@ fn run_streaming(mut cmd: Command, conn: &Connection) -> Result<(), Error> {
     }
 
     let status = child
-        .wait_with_output()
+        .wait()
         .map_err(|e| Error::ActivationFailed(e.to_string()))?;
-    if !status.status.success() {
-        let stderr = String::from_utf8_lossy(&status.stderr);
+    let stderr = stderr_reader.join().unwrap_or_default();
+    if !status.success() {
         return Err(Error::ActivationFailed(stderr.trim().to_string()));
     }
     Ok(())

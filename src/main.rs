@@ -2,19 +2,18 @@ mod activate;
 mod authz;
 mod error;
 mod lock;
+mod names;
 mod trigger;
 
 use zbus::connection;
 
+use names::{BUS_NAME, OBJECT_PATH};
 use trigger::{Mode, Trigger};
-
-const BUS_NAME: &str = "systems.staticroot.Trigger";
-const OBJECT_PATH: &str = "/systems/staticroot/Trigger";
 
 fn mode_from_env() -> Mode {
     match std::env::var("FRACTAL_TRIGGER_MODE").as_deref() {
-        Ok("enrolled") => Mode::Enrolled,
-        _ => Mode::Standalone,
+        Ok("deployed") => Mode::Deployed,
+        _ => Mode::Personal,
     }
 }
 

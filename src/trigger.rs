@@ -5,14 +5,15 @@ use zbus::object_server::SignalEmitter;
 use zbus::{interface, Connection};
 
 use crate::error::Error;
+use crate::names::{ACTION_LOCK, ACTION_SWITCH};
 use crate::{activate, authz, lock};
 
 #[derive(Clone, Copy)]
 pub enum Mode {
     /// Consumer: authorize via polkit (local presence).
-    Standalone,
+    Personal,
     /// Enterprise: authorize via offline signature + nonce.
-    Enrolled,
+    Deployed,
 }
 
 pub struct Trigger {
@@ -47,16 +48,16 @@ impl Trigger {
 
     async fn check(&self, conn: &Connection, hdr: &Header<'_>, action: &str) -> Result<(), Error> {
         match self.mode {
-            Mode::Standalone => {
+            Mode::Personal => {
                 let caller = hdr.sender().ok_or_else(|| {
                     Error::NotAuthorized("caller has no bus name".to_string())
                 })?;
                 authz::authorize(conn, caller.as_str(), action).await
             }
             // LockScreen/SwitchToStorePath callers are already gated to the agent
-            // by the D-Bus policy; enrolled switches additionally verify the
+            // by the D-Bus policy; deployed switches additionally verify the
             // signature in the method body.
-            Mode::Enrolled => Ok(()),
+            Mode::Deployed => Ok(()),
         }
     }
 }
@@ -75,10 +76,9 @@ impl Trigger {
             .try_activate()
             .ok_or_else(|| Error::Busy("an activation is already in progress".to_string()))?;
 
-        self.check(conn, &hdr, "systems.staticroot.trigger.switch")
-            .await?;
-        if let Mode::Enrolled = self.mode {
-            authz::verify(&signature, &nonce)?;
+        self.check(conn, &hdr, ACTION_SWITCH).await?;
+        if let Mode::Deployed = self.mode {
+            authz::verify(&store_path, &signature, &nonce)?;
         }
 
         let conn = conn.clone();
@@ -90,8 +90,7 @@ impl Trigger {
         #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] conn: &Connection,
     ) -> Result<(), Error> {
-        self.check(conn, &hdr, "systems.staticroot.trigger.lock")
-            .await?;
+        self.check(conn, &hdr, ACTION_LOCK).await?;
         lock::lock_sessions(conn).await
     }
 

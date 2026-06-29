@@ -33,11 +33,11 @@ in
     };
 
     mode = lib.mkOption {
-      type = lib.types.enum [ "standalone" "enrolled" ];
-      default = "standalone";
+      type = lib.types.enum [ "personal" "deployed" ];
+      default = "personal";
       description = ''
-        Authorization mode. `standalone` (consumer) authorizes callers via
-        polkit; `enrolled` (enterprise) authorizes switches via an offline
+        Authorization mode. `personal` (consumer) authorizes callers via
+        polkit; `deployed` (enterprise) authorizes switches via an offline
         signature + nonce.
       '';
     };
@@ -50,7 +50,7 @@ in
     environment.systemPackages = [ polkitActions ];
 
     # v1: grant the agent the trigger actions non-interactively. Interactive
-    # auth (consumer desktop) and enrolled signatures replace this later.
+    # auth (consumer desktop) and deployed signatures replace this later.
     security.polkit.extraConfig = ''
       polkit.addRule(function(action, subject) {
         if ((action.id == "systems.staticroot.trigger.switch" ||

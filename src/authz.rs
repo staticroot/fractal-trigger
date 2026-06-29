@@ -37,7 +37,7 @@ trait Authority {
     ) -> zbus::Result<AuthResult>;
 }
 
-/// `standalone` mode: ask polkit whether `caller` may perform `action_id`. No
+/// `personal` mode: ask polkit whether `caller` may perform `action_id`. No
 /// interactive flag — the polkit rule grants the agent uid non-interactively;
 /// anyone else is refused.
 pub async fn authorize(conn: &Connection, caller: &str, action_id: &str) -> Result<(), Error> {
@@ -64,9 +64,11 @@ pub async fn authorize(conn: &Connection, caller: &str, action_id: &str) -> Resu
     }
 }
 
-/// `enrolled` mode seam: offline signature + nonce check for enterprise replay
-/// protection. STUB — always accepts. Real verification lands here.
-pub fn verify(_signature: &str, _nonce: &str) -> Result<(), Error> {
+/// `deployed` mode seam: verify that `signature` authorizes activating
+/// `store_path`, with `nonce` for replay protection. The signed payload must
+/// cover `store_path` so a signature can't be replayed against a different one.
+/// STUB — always accepts. Real verification lands here.
+pub fn verify(_store_path: &str, _signature: &str, _nonce: &str) -> Result<(), Error> {
     Ok(())
 }
 
@@ -76,7 +78,7 @@ mod tests {
 
     #[test]
     fn verify_stub_accepts() {
-        assert!(verify("", "").is_ok());
-        assert!(verify("sig", "nonce").is_ok());
+        assert!(verify("", "", "").is_ok());
+        assert!(verify("/nix/store/abc-foo", "sig", "nonce").is_ok());
     }
 }

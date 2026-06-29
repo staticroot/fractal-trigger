@@ -17,7 +17,7 @@ pkgs.testers.runNixOSTest {
       enable = true;
       inherit package;
       agentUser = "agent";
-      mode = "standalone";
+      mode = "personal";
     };
   };
 
