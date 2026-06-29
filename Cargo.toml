@@ -1,0 +1,10 @@
+[package]
+name = "fractal-trigger"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-io = "2.6.0"
+blocking = "1.6.2"
+serde = { version = "1.0.228", features = ["derive"] }
+zbus = "5"
