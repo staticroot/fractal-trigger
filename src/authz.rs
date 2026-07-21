@@ -1,84 +1,102 @@
-use std::collections::HashMap;
+//! Activation authorization: a single Ed25519 signature over the trigger-issued
+//! nonce and the store path. The trigger verifies only *authorization and
+//! freshness* — whether the bytes at the path are trustworthy is Nix's job, not
+//! ours. Nonce freshness (pending, unexpired, burn) is handled by the caller in
+//! `trigger.rs`; this function is the pure signature check.
 
-use serde::{Deserialize, Serialize};
-use zbus::zvariant::{Type, Value};
-use zbus::Connection;
+use ed25519_dalek::{Signature, VerifyingKey};
 
+use crate::encoding;
 use crate::error::Error;
 
-#[derive(Serialize, Type)]
-struct Subject<'a> {
-    kind: &'a str,
-    details: HashMap<&'a str, Value<'a>>,
-}
+/// Verify that `signature` (hex, 64 bytes) authorizes activating `store_path`
+/// with `nonce`, under at least one trusted key. `verify_strict` rejects
+/// malleable and small-order signatures.
+pub fn verify(
+    keys: &[VerifyingKey],
+    store_path: &str,
+    signature: &str,
+    nonce: &str,
+) -> Result<(), Error> {
+    let sig_bytes = hex::decode(signature)
+        .map_err(|_| Error::NotAuthorized("signature is not valid hex".to_string()))?;
+    let sig = Signature::from_slice(&sig_bytes)
+        .map_err(|_| Error::NotAuthorized("signature is not 64 bytes".to_string()))?;
 
-#[derive(Deserialize, Type)]
-struct AuthResult {
-    is_authorized: bool,
-    #[allow(dead_code)]
-    is_challenge: bool,
-    #[allow(dead_code)]
-    details: HashMap<String, String>,
-}
-
-#[zbus::proxy(
-    interface = "org.freedesktop.PolicyKit1.Authority",
-    default_service = "org.freedesktop.PolicyKit1",
-    default_path = "/org/freedesktop/PolicyKit1/Authority"
-)]
-trait Authority {
-    fn check_authorization(
-        &self,
-        subject: &Subject<'_>,
-        action_id: &str,
-        details: HashMap<&str, &str>,
-        flags: u32,
-        cancellation_id: &str,
-    ) -> zbus::Result<AuthResult>;
-}
-
-/// `personal` mode: ask polkit whether `caller` may perform `action_id`. No
-/// interactive flag — the polkit rule grants the agent uid non-interactively;
-/// anyone else is refused.
-pub async fn authorize(conn: &Connection, caller: &str, action_id: &str) -> Result<(), Error> {
-    let authority = AuthorityProxy::new(conn)
-        .await
-        .map_err(|e| Error::NotAuthorized(e.to_string()))?;
-
-    let mut details = HashMap::new();
-    details.insert("name", Value::from(caller));
-    let subject = Subject {
-        kind: "system-bus-name",
-        details,
-    };
-
-    let result = authority
-        .check_authorization(&subject, action_id, HashMap::new(), 0, "")
-        .await
-        .map_err(|e| Error::NotAuthorized(e.to_string()))?;
-
-    if result.is_authorized {
-        Ok(())
-    } else {
-        Err(Error::NotAuthorized(format!("polkit denied {action_id}")))
+    let msg = encoding::activation_message(store_path, nonce);
+    for key in keys {
+        if key.verify_strict(&msg, &sig).is_ok() {
+            return Ok(());
+        }
     }
-}
-
-/// `deployed` mode seam: verify that `signature` authorizes activating
-/// `store_path`, with `nonce` for replay protection. The signed payload must
-/// cover `store_path` so a signature can't be replayed against a different one.
-/// STUB — always accepts. Real verification lands here.
-pub fn verify(_store_path: &str, _signature: &str, _nonce: &str) -> Result<(), Error> {
-    Ok(())
+    Err(Error::NotAuthorized(
+        "no trusted key verifies this signature".to_string(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::verify;
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    // Frozen KAT — mirrored in fractal-signer so signer and verifier can't drift.
+    const KAT_SEED: [u8; 32] = [7u8; 32];
+    const KAT_STORE: &str = "/nix/store/00000000000000000000000000000000-x";
+    const KAT_NONCE: &str = "deadbeef";
+    const KAT_SIGNATURE_HEX: &str = "eb0cf6e0622b2d460f741d222b04715329f773c585d47eb493955e9eaf98ac0ef274653dc16c7e025d3f67b197f2fe8319d89fa34707a1e558a80a0f13eead06";
+
+    fn signing_key() -> SigningKey {
+        SigningKey::from_bytes(&KAT_SEED)
+    }
+
+    fn sign(sk: &SigningKey, store: &str, nonce: &str) -> String {
+        hex::encode(sk.sign(&encoding::activation_message(store, nonce)).to_bytes())
+    }
 
     #[test]
-    fn verify_stub_accepts() {
-        assert!(verify("", "", "").is_ok());
-        assert!(verify("/nix/store/abc-foo", "sig", "nonce").is_ok());
+    fn frozen_signature_kat() {
+        // Ed25519 is deterministic, so a fixed key + message is a stable vector.
+        assert_eq!(sign(&signing_key(), KAT_STORE, KAT_NONCE), KAT_SIGNATURE_HEX);
+    }
+
+    #[test]
+    fn accepts_valid_signature() {
+        let sk = signing_key();
+        let keys = vec![sk.verifying_key()];
+        let sig = sign(&sk, KAT_STORE, KAT_NONCE);
+        assert!(verify(&keys, KAT_STORE, &sig, KAT_NONCE).is_ok());
+    }
+
+    #[test]
+    fn rejects_tampered_path() {
+        let sk = signing_key();
+        let keys = vec![sk.verifying_key()];
+        let sig = sign(&sk, KAT_STORE, KAT_NONCE);
+        assert!(verify(&keys, "/nix/store/11111111111111111111111111111111-x", &sig, KAT_NONCE).is_err());
+    }
+
+    #[test]
+    fn rejects_tampered_nonce() {
+        let sk = signing_key();
+        let keys = vec![sk.verifying_key()];
+        let sig = sign(&sk, KAT_STORE, KAT_NONCE);
+        assert!(verify(&keys, KAT_STORE, &sig, "beefdead").is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_key() {
+        let signer = signing_key();
+        let other = SigningKey::from_bytes(&[9u8; 32]);
+        let keys = vec![other.verifying_key()];
+        let sig = sign(&signer, KAT_STORE, KAT_NONCE);
+        assert!(verify(&keys, KAT_STORE, &sig, KAT_NONCE).is_err());
+    }
+
+    #[test]
+    fn rejects_garbage_signature() {
+        let keys = vec![signing_key().verifying_key()];
+        assert!(verify(&keys, KAT_STORE, &"00".repeat(64), KAT_NONCE).is_err());
+        assert!(verify(&keys, KAT_STORE, "not-hex", KAT_NONCE).is_err());
+        assert!(verify(&keys, KAT_STORE, "abcd", KAT_NONCE).is_err()); // wrong length
     }
 }
