@@ -6,7 +6,7 @@ use zbus::{interface, Connection};
 
 use crate::error::Error;
 use crate::nonce::NonceStore;
-use crate::{activate, authz, lock};
+use crate::{activate, authz, encoding, lock};
 
 pub struct Trigger {
     /// Trusted keys, any of which may authorize an activation. The root-owned
@@ -42,11 +42,13 @@ impl Trigger {
             .map(|_| ActivationGuard(&self.activating))
     }
 
-    /// Verify before burning: a bad signature must never spend a victim's
-    /// pending nonce. The burn is the single-use guarantee, so it lands exactly
-    /// once and only after the signature checks out.
-    fn authorize(&self, store_path: &str, signature: &str, nonce: &str) -> Result<(), Error> {
-        authz::verify(&self.keys, store_path, signature, nonce)?;
+    /// Verify a signature over `message`, then burn `nonce`. Verify before
+    /// burning: a bad signature must never spend a victim's pending nonce. The
+    /// burn is the single-use guarantee, so it lands exactly once and only after
+    /// the signature checks out. `nonce` must be the one bound into `message`;
+    /// the caller builds the domain-separated message for its operation.
+    fn authorize(&self, message: &[u8], signature: &str, nonce: &str) -> Result<(), Error> {
+        authz::verify(&self.keys, message, signature)?;
         if !self.nonces.burn(nonce) {
             return Err(Error::NotAuthorized(
                 "nonce not recognized, already used, or expired".to_string(),
@@ -81,15 +83,29 @@ impl Trigger {
             .try_activate()
             .ok_or_else(|| Error::Busy("an activation is already in progress".to_string()))?;
 
-        self.authorize(&store_path, &signature, &nonce)?;
+        let message = encoding::activation_message(&store_path, &nonce);
+        self.authorize(&message, &signature, &nonce)?;
 
         let conn = conn.clone();
         blocking::unblock(move || activate::run(&store_path, &conn)).await
     }
 
-    /// Machine-wide screen lock. Gated to the agent by the D-Bus policy and
-    /// carries no activation authority, so it needs no signature.
-    async fn lock_screen(&self, #[zbus(connection)] conn: &Connection) -> Result<(), Error> {
+    /// Machine-wide screen lock. Enterprise-only: the managed control plane signs
+    /// a fresh trigger-issued nonce under its trusted key, exactly as an
+    /// activation is signed. The trigger stays mode-agnostic — a standalone
+    /// device simply has no party holding a key to sign a lock, so none verifies.
+    /// The D-Bus caller policy still gates *reachability*; the signature gates
+    /// *authority*. `IssueNonce` cannot itself be signed, so the two are not
+    /// redundant.
+    async fn lock_screen(
+        &self,
+        signature: String,
+        nonce: String,
+        #[zbus(connection)] conn: &Connection,
+    ) -> Result<(), Error> {
+        let message = encoding::lock_message(&nonce);
+        self.authorize(&message, &signature, &nonce)?;
+
         lock::lock_sessions(conn).await
     }
 
@@ -112,8 +128,12 @@ mod tests {
         SigningKey::from_bytes(&[7u8; 32])
     }
 
-    fn sign(sk: &SigningKey, store: &str, nonce: &str) -> String {
+    fn sign_activation(sk: &SigningKey, store: &str, nonce: &str) -> String {
         hex::encode(sk.sign(&encoding::activation_message(store, nonce)).to_bytes())
+    }
+
+    fn sign_lock(sk: &SigningKey, nonce: &str) -> String {
+        hex::encode(sk.sign(&encoding::lock_message(nonce)).to_bytes())
     }
 
     #[test]
@@ -130,12 +150,13 @@ mod tests {
         let sk = signing_key();
         let t = Trigger::new(vec![sk.verifying_key()]);
         let nonce = t.nonces.issue().unwrap();
-        let sig = sign(&sk, STORE, &nonce);
+        let msg = encoding::activation_message(STORE, &nonce);
+        let sig = sign_activation(&sk, STORE, &nonce);
 
-        assert!(t.authorize(STORE, &sig, &nonce).is_ok());
+        assert!(t.authorize(&msg, &sig, &nonce).is_ok());
         // Replaying the same signature no longer authorizes: the nonce is burned.
         assert!(matches!(
-            t.authorize(STORE, &sig, &nonce),
+            t.authorize(&msg, &sig, &nonce),
             Err(Error::NotAuthorized(_))
         ));
     }
@@ -145,12 +166,44 @@ mod tests {
         let sk = signing_key();
         let t = Trigger::new(vec![sk.verifying_key()]);
         let nonce = t.nonces.issue().unwrap();
+        let msg = encoding::activation_message(STORE, &nonce);
 
         assert!(matches!(
-            t.authorize(STORE, &"00".repeat(64), &nonce),
+            t.authorize(&msg, &"00".repeat(64), &nonce),
             Err(Error::NotAuthorized(_))
         ));
         // The rejected signature never reached the burn, so the nonce still lives.
         assert!(t.nonces.burn(&nonce), "pending nonce survives a rejected signature");
+    }
+
+    #[test]
+    fn lock_signature_authorizes_and_burns() {
+        let sk = signing_key();
+        let t = Trigger::new(vec![sk.verifying_key()]);
+        let nonce = t.nonces.issue().unwrap();
+        let msg = encoding::lock_message(&nonce);
+        let sig = sign_lock(&sk, &nonce);
+
+        assert!(t.authorize(&msg, &sig, &nonce).is_ok());
+        assert!(matches!(
+            t.authorize(&msg, &sig, &nonce),
+            Err(Error::NotAuthorized(_))
+        ));
+    }
+
+    /// An activation signature must not authorize a lock on the same nonce, and
+    /// the failed attempt must not burn that nonce.
+    #[test]
+    fn activation_signature_cannot_authorize_a_lock() {
+        let sk = signing_key();
+        let t = Trigger::new(vec![sk.verifying_key()]);
+        let nonce = t.nonces.issue().unwrap();
+        let activation_sig = sign_activation(&sk, STORE, &nonce);
+
+        assert!(matches!(
+            t.authorize(&encoding::lock_message(&nonce), &activation_sig, &nonce),
+            Err(Error::NotAuthorized(_))
+        ));
+        assert!(t.nonces.burn(&nonce), "cross-context rejection spares the nonce");
     }
 }

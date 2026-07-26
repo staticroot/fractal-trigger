@@ -24,24 +24,30 @@ let
         f.write(pub.hex() + "\n")
   '';
 
-  # Sign like the real fractal-signer: the exact domain-separated, length-prefixed
-  # encoding the trigger verifies. Prints the signature as hex.
+  # Sign like the real signer (activation) or the managed control plane (lock):
+  # the exact domain-separated, length-prefixed encoding the trigger verifies.
+  #   sign activation <store> <nonce>   |   sign lock <nonce>
+  # Prints the signature as hex.
   sign = pkgs.writeScript "fractal-test-sign" ''
     #!${py}/bin/python3
     import struct, sys
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-    store, nonce = sys.argv[1], sys.argv[2]
-    seed = bytes.fromhex(open("/root/signing-seed").read().strip())
-    sk = Ed25519PrivateKey.from_private_bytes(seed)
+    def lp(s):
+        return struct.pack("<Q", len(s)) + s.encode()
 
-    ctx = b"systems.staticroot.trigger/activation/v1"
-    msg = (
-        ctx
-        + struct.pack("<Q", len(store)) + store.encode()
-        + struct.pack("<Q", len(nonce)) + nonce.encode()
-    )
-    sys.stdout.write(sk.sign(msg).hex())
+    op = sys.argv[1]
+    if op == "activation":
+        store, nonce = sys.argv[2], sys.argv[3]
+        msg = b"systems.staticroot.trigger/activation/v1" + lp(store) + lp(nonce)
+    elif op == "lock":
+        nonce = sys.argv[2]
+        msg = b"systems.staticroot.trigger/lock/v1" + lp(nonce)
+    else:
+        sys.exit(f"unknown op {op}")
+
+    seed = bytes.fromhex(open("/root/signing-seed").read().strip())
+    sys.stdout.write(Ed25519PrivateKey.from_private_bytes(seed).sign(msg).hex())
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -92,12 +98,12 @@ pkgs.testers.runNixOSTest {
         # busctl prints: s "<nonce>"
         return machine.succeed(call("IssueNonce", "")).strip().split('"')[1]
 
-    def sign(store, nonce):
-        return machine.succeed(f"${sign} {store} {nonce}").strip()
+    def sign(op, *args):
+        return machine.succeed(f"${sign} {op} {' '.join(args)}").strip()
 
     # 1. Happy path: issue → sign → switch repoints the system profile.
     nonce = issue_nonce()
-    sig = sign(target, nonce)
+    sig = sign("activation", target, nonce)
     machine.succeed(call("SwitchToStorePath", f"sss {target} {sig} {nonce}"))
     profile = machine.succeed("readlink -f /nix/var/nix/profiles/system").strip()
     assert profile == target, f"profile {profile} != target {target}"
@@ -109,10 +115,19 @@ pkgs.testers.runNixOSTest {
     fresh = issue_nonce()
     machine.fail(call("SwitchToStorePath", f'sss {target} "" {fresh}'))
 
-    # 4. A non-agent caller is refused by the D-Bus policy.
-    machine.fail(call("LockScreen", "", user="nobody"))
+    # 4. A non-agent caller is refused by the D-Bus policy before authority even matters.
+    machine.fail(call("LockScreen", 'ss "" ""', user="nobody"))
 
-    # 5. LockScreen succeeds for the agent.
-    machine.succeed(call("LockScreen", ""))
+    # 5. Unsigned lock is refused: the caller policy is reachability, not authority.
+    fresh = issue_nonce()
+    machine.fail(call("LockScreen", f'ss "" {fresh}'))
+
+    # 6. An activation signature must not authorize a lock on the same nonce.
+    cross = sign("activation", target, fresh)
+    machine.fail(call("LockScreen", f"ss {cross} {fresh}"))
+
+    # 7. A properly signed lock succeeds (the nonce above survived the rejections).
+    locksig = sign("lock", fresh)
+    machine.succeed(call("LockScreen", f"ss {locksig} {fresh}"))
   '';
 }
