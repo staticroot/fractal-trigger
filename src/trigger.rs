@@ -42,11 +42,10 @@ impl Trigger {
             .map(|_| ActivationGuard(&self.activating))
     }
 
-    /// Verify a signature over `message`, then burn `nonce`. Verify before
-    /// burning: a bad signature must never spend a victim's pending nonce. The
-    /// burn is the single-use guarantee, so it lands exactly once and only after
-    /// the signature checks out. `nonce` must be the one bound into `message`;
-    /// the caller builds the domain-separated message for its operation.
+    /// Verify the signature over `message`, then burn `nonce`. Verifying first
+    /// keeps a bad signature from spending a victim's pending nonce; the burn is
+    /// what makes the nonce single-use. `nonce` must be the one bound into
+    /// `message`, which the caller builds per operation.
     fn authorize(&self, message: &[u8], signature: &str, nonce: &str) -> Result<(), Error> {
         authz::verify(&self.keys, message, signature)?;
         if !self.nonces.burn(nonce) {
@@ -90,13 +89,12 @@ impl Trigger {
         blocking::unblock(move || activate::run(&store_path, &conn)).await
     }
 
-    /// Machine-wide screen lock. Enterprise-only: the managed control plane signs
-    /// a fresh trigger-issued nonce under its trusted key, exactly as an
-    /// activation is signed. The trigger stays mode-agnostic — a standalone
-    /// device simply has no party holding a key to sign a lock, so none verifies.
-    /// The D-Bus caller policy still gates *reachability*; the signature gates
-    /// *authority*. `IssueNonce` cannot itself be signed, so the two are not
-    /// redundant.
+    /// Machine-wide screen lock, signed like an activation: the managed control
+    /// plane signs a fresh trigger-issued nonce under its trusted key. The trigger
+    /// stays mode-agnostic, so a standalone device with no lock-signing key has
+    /// nothing that verifies. The D-Bus caller policy gates reachability and the
+    /// signature gates authority; since `IssueNonce` itself can't be signed, the
+    /// two aren't redundant.
     async fn lock_screen(
         &self,
         signature: String,

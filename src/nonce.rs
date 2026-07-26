@@ -4,7 +4,7 @@
 //! Memory-only is what makes replay defence fall out for free: a nonce is valid
 //! only while it sits in the live set, burning it removes it, and a restart
 //! clears the set so a replayed old nonce simply is not pending. Restart is
-//! fail-safe — the worst case is a lost pending activation that must be
+//! fail-safe: the worst case is a lost pending activation that must be
 //! re-requested.
 
 use std::collections::HashMap;

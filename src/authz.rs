@@ -1,9 +1,8 @@
 //! Signature authorization: a single Ed25519 signature over a domain-separated
-//! `encoding` message. The trigger verifies only *authorization and freshness* —
+//! `encoding` message. The trigger verifies only authorization and freshness;
 //! whether the bytes at an activation path are trustworthy is Nix's job, not
-//! ours. Nonce freshness (pending, unexpired, burn) and building the exact
-//! message for each operation are handled by the caller in `trigger.rs`; this
-//! function is the pure signature check.
+//! ours. Nonce freshness and building the per-operation message live in the
+//! caller (`trigger.rs`); this is the pure signature check.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
@@ -36,7 +35,7 @@ mod tests {
 
     use crate::encoding;
 
-    // Frozen KAT — mirrored in fractal-signer so signer and verifier can't drift.
+    // Frozen KAT, mirrored in fractal-signer so signer and verifier can't drift.
     const KAT_SEED: [u8; 32] = [7u8; 32];
     const KAT_STORE: &str = "/nix/store/00000000000000000000000000000000-x";
     const KAT_NONCE: &str = "deadbeef";

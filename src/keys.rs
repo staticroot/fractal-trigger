@@ -1,5 +1,5 @@
-//! The trusted-keys file is the real root of trust — it matters more than the
-//! cryptography. Whoever can write it controls what the trigger accepts, so we
+//! The trusted-keys file is the real root of trust, more than the cryptography.
+//! Whoever can write it controls what the trigger accepts, so we
 //! require it to be root-owned and not writable by group or other, and refuse to
 //! start otherwise. The set of keys is what enables rotation and fixes override
 //! posture: a device that trusts only the org key cannot be overridden locally.

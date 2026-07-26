@@ -28,7 +28,7 @@ pub fn activation_message(store_path: &str, nonce: &str) -> Vec<u8> {
 }
 
 /// `LOCK_CONTEXT ‖ len(nonce) ‖ nonce`, the length a little-endian `u64`. A lock
-/// carries no store path — the trigger-issued nonce is the whole authorization,
+/// carries no store path: the trigger-issued nonce is the whole authorization,
 /// so a captured signature dies with its single-use, device-local nonce.
 pub fn lock_message(nonce: &str) -> Vec<u8> {
     let nonce = nonce.as_bytes();
@@ -43,9 +43,9 @@ pub fn lock_message(nonce: &str) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    // Frozen vectors — the activation message must match the identical KAT in
+    // Frozen vectors. The activation message must match the identical KAT in
     // fractal-signer; the lock message has no in-repo counterpart (the managed
-    // control plane is its signer) but is frozen here so it can never drift.
+    // control plane signs locks) but is frozen here so it cannot drift.
     const KAT_STORE: &str = "/nix/store/00000000000000000000000000000000-x";
     const KAT_NONCE: &str = "deadbeef";
     const KAT_ACTIVATION_MESSAGE_HEX: &str = "73797374656d732e737461746963726f6f742e747269676765722f61637469766174696f6e2f76312d000000000000002f6e69782f73746f72652f30303030303030303030303030303030303030303030303030303030303030302d7808000000000000006465616462656566";
