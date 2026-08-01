@@ -1,7 +1,7 @@
 //! Domain-separated, length-prefixed encoding of the message a signature
 //! authorizes. The signer and the verifier must agree on these bytes exactly;
-//! the known-answer tests below are mirrored in the agent's `fractal-signer` so
-//! the two implementations cannot silently drift.
+//! the known-answer tests below are mirrored in `fractal-lawyer` so the two
+//! implementations cannot silently drift.
 
 /// Context-and-version tag for an activation. Bump the version suffix if the
 /// layout ever changes, so a signature can never be valid under two encodings.
@@ -44,8 +44,8 @@ mod tests {
     use super::*;
 
     // Frozen vectors. The activation message must match the identical KAT in
-    // fractal-signer; the lock message has no in-repo counterpart (the managed
-    // control plane signs locks) but is frozen here so it cannot drift.
+    // fractal-lawyer; the lock message has no counterpart in any signer we ship
+    // (the managed control plane signs locks) but is frozen here so it cannot drift.
     const KAT_STORE: &str = "/nix/store/00000000000000000000000000000000-x";
     const KAT_NONCE: &str = "deadbeef";
     const KAT_ACTIVATION_MESSAGE_HEX: &str = "73797374656d732e737461746963726f6f742e747269676765722f61637469766174696f6e2f76312d000000000000002f6e69782f73746f72652f30303030303030303030303030303030303030303030303030303030303030302d7808000000000000006465616462656566";

@@ -51,6 +51,13 @@ in
 
       path = [ pkgs.lix ];
 
+      # switch-to-configuration runs as a child of this unit, so letting a switch
+      # restart the unit would kill the activation halfway through: systemd tears
+      # down the whole control group. Interim measure until fractal-bullet moves
+      # the activation into its own transient unit, after which this comes off and
+      # a new trigger takes over immediately rather than at next boot.
+      restartIfChanged = false;
+
       # Deliberately unsandboxed: switch-to-configuration needs full root access
       # (writes /boot and /etc, restarts units, runs activation scripts).
       serviceConfig = {

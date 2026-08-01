@@ -24,13 +24,14 @@ let
         f.write(pub.hex() + "\n")
   '';
 
-  # Sign like the real signer (activation) or the managed control plane (lock):
-  # the exact domain-separated, length-prefixed encoding the trigger verifies.
+  # Sign like the lawyer (activation) or the managed control plane (lock): the
+  # exact domain-separated, length-prefixed encoding the trigger verifies.
   #   sign activation <store> <nonce>   |   sign lock <nonce>
-  # Prints the signature as hex.
+  # Prints the signature as hex. Reads the seed from $FRACTAL_TEST_SEED, which
+  # is what lets the vector check below drive it with the frozen key.
   sign = pkgs.writeScript "fractal-test-sign" ''
     #!${py}/bin/python3
-    import struct, sys
+    import os, struct, sys
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     def lp(s):
@@ -46,9 +47,22 @@ let
     else:
         sys.exit(f"unknown op {op}")
 
-    seed = bytes.fromhex(open("/root/signing-seed").read().strip())
+    path = os.environ.get("FRACTAL_TEST_SEED", "/root/signing-seed")
+    seed = bytes.fromhex(open(path).read().strip())
     sys.stdout.write(Ed25519PrivateKey.from_private_bytes(seed).sign(msg).hex())
   '';
+
+  # This test reimplements the signing encoding, because letting it use the real
+  # lawyer would couple this repository to that one. The frozen vectors are what
+  # keep the reimplementation honest: they are byte for byte the ones in
+  # src/encoding.rs and src/authz.rs, so a drift here fails before it ships.
+  kat = {
+    seed = builtins.concatStringsSep "" (builtins.genList (_: "07") 32);
+    store = "/nix/store/00000000000000000000000000000000-x";
+    nonce = "deadbeef";
+    activation = "eb0cf6e0622b2d460f741d222b04715329f773c585d47eb493955e9eaf98ac0ef274653dc16c7e025d3f67b197f2fe8319d89fa34707a1e558a80a0f13eead06";
+    lock = "5bc3139499ce918f730d7c73dd74e7d32cd79e17505f31c6a6936d4724d9e6ea5d155d0a2a4016d938e77619c40f4fddc8ce9d8722579d995f13eb05490a7709";
+  };
 in
 pkgs.testers.runNixOSTest {
   name = "fractal-trigger";
@@ -86,7 +100,10 @@ pkgs.testers.runNixOSTest {
 
     # Use the VM's own system closure as the target: re-activating it exercises
     # the full switch path while staying idempotent (won't break the live VM).
+    # It therefore cannot see anything that only happens when the closure really
+    # changes; that is the composed end-to-end test's job, not this one's.
     target = machine.succeed("readlink -f /run/current-system").strip()
+    pubkey = machine.succeed("cat /var/lib/fractal-trigger/trusted-keys").strip()
 
     def call(method, args, user="agent"):
         return (
@@ -94,17 +111,34 @@ pkgs.testers.runNixOSTest {
             f"/systems/staticroot/Trigger systems.staticroot.Trigger {method} {args}"
         )
 
+    def one_string(out):
+        # busctl prints: s "<value>"
+        return out.strip().split('"')[1]
+
     def issue_nonce():
-        # busctl prints: s "<nonce>"
-        return machine.succeed(call("IssueNonce", "")).strip().split('"')[1]
+        return one_string(machine.succeed(call("IssueNonce", "")))
 
     def sign(op, *args):
         return machine.succeed(f"${sign} {op} {' '.join(args)}").strip()
 
-    # 1. Happy path: issue → sign → switch repoints the system profile.
+    # 0. The signer in this file reimplements the encoding, so pin it to the
+    #    same frozen vectors src/encoding.rs and src/authz.rs carry.
+    machine.succeed("echo ${kat.seed} > /root/kat-seed")
+    for op, args, want in [
+        ("activation", ["${kat.store}", "${kat.nonce}"], "${kat.activation}"),
+        ("lock", ["${kat.nonce}"], "${kat.lock}"),
+    ]:
+        got = machine.succeed(
+            f"FRACTAL_TEST_SEED=/root/kat-seed ${sign} {op} {' '.join(args)}"
+        ).strip()
+        assert got == want, f"{op} vector drifted: {got} != {want}"
+
+    # 1. Happy path: issue, sign, switch repoints the system profile, and the
+    #    trigger names the key that verified rather than merely succeeding.
     nonce = issue_nonce()
     sig = sign("activation", target, nonce)
-    machine.succeed(call("SwitchToStorePath", f"sss {target} {sig} {nonce}"))
+    verified = one_string(machine.succeed(call("SwitchToStorePath", f"sss {target} {sig} {nonce}")))
+    assert verified == pubkey, f"reported key {verified} != trusted key {pubkey}"
     profile = machine.succeed("readlink -f /nix/var/nix/profiles/system").strip()
     assert profile == target, f"profile {profile} != target {target}"
 
@@ -126,8 +160,9 @@ pkgs.testers.runNixOSTest {
     cross = sign("activation", target, fresh)
     machine.fail(call("LockScreen", f"ss {cross} {fresh}"))
 
-    # 7. A properly signed lock succeeds (the nonce above survived the rejections).
+    # 7. A properly signed lock succeeds (the nonce above survived the rejections)
+    #    and likewise names its key.
     locksig = sign("lock", fresh)
-    machine.succeed(call("LockScreen", f"ss {locksig} {fresh}"))
+    assert one_string(machine.succeed(call("LockScreen", f"ss {locksig} {fresh}"))) == pubkey
   '';
 }

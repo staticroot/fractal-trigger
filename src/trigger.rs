@@ -42,18 +42,19 @@ impl Trigger {
             .map(|_| ActivationGuard(&self.activating))
     }
 
-    /// Verify the signature over `message`, then burn `nonce`. Verifying first
-    /// keeps a bad signature from spending a victim's pending nonce; the burn is
-    /// what makes the nonce single-use. `nonce` must be the one bound into
-    /// `message`, which the caller builds per operation.
-    fn authorize(&self, message: &[u8], signature: &str, nonce: &str) -> Result<(), Error> {
-        authz::verify(&self.keys, message, signature)?;
+    /// Verify the signature over `message`, then burn `nonce`, and return the
+    /// verifying key hex encoded. Verifying first keeps a bad signature from
+    /// spending a victim's pending nonce; the burn is what makes the nonce
+    /// single-use. `nonce` must be the one bound into `message`, which the
+    /// caller builds per operation.
+    fn authorize(&self, message: &[u8], signature: &str, nonce: &str) -> Result<String, Error> {
+        let key = authz::verify(&self.keys, message, signature)?;
         if !self.nonces.burn(nonce) {
             return Err(Error::NotAuthorized(
                 "nonce not recognized, already used, or expired".to_string(),
             ));
         }
-        Ok(())
+        Ok(hex::encode(key.to_bytes()))
     }
 }
 
@@ -67,26 +68,32 @@ impl Trigger {
             .ok_or_else(|| Error::Busy("too many outstanding nonces".to_string()))
     }
 
-    /// Authorize, then switch. The trigger knows nothing about who signed or
-    /// why, only that a trusted key authorized this exact path with a nonce it
-    /// issued and has not yet burned. Burning before the switch keeps a crash
-    /// mid-switch from stranding a reusable nonce.
+    /// Authorize, then switch, then name the key that authorized it. The trigger
+    /// knows nothing about who signed or why, only that a trusted key authorized
+    /// this exact path with a nonce it issued and has not yet burned. Burning
+    /// before the switch keeps a crash mid-switch from stranding a reusable
+    /// nonce.
+    ///
+    /// The returned key is the only record on the device of which authority
+    /// stood behind a generation, and it is a fact the trigger witnessed rather
+    /// than a claim anyone made.
     async fn switch_to_store_path(
         &self,
         store_path: String,
         signature: String,
         nonce: String,
         #[zbus(connection)] conn: &Connection,
-    ) -> Result<(), Error> {
+    ) -> Result<String, Error> {
         let _guard = self
             .try_activate()
             .ok_or_else(|| Error::Busy("an activation is already in progress".to_string()))?;
 
         let message = encoding::activation_message(&store_path, &nonce);
-        self.authorize(&message, &signature, &nonce)?;
+        let key = self.authorize(&message, &signature, &nonce)?;
 
         let conn = conn.clone();
-        blocking::unblock(move || activate::run(&store_path, &conn)).await
+        blocking::unblock(move || activate::run(&store_path, &conn)).await?;
+        Ok(key)
     }
 
     /// Machine-wide screen lock, signed like an activation: the managed control
@@ -100,11 +107,12 @@ impl Trigger {
         signature: String,
         nonce: String,
         #[zbus(connection)] conn: &Connection,
-    ) -> Result<(), Error> {
+    ) -> Result<String, Error> {
         let message = encoding::lock_message(&nonce);
-        self.authorize(&message, &signature, &nonce)?;
+        let key = self.authorize(&message, &signature, &nonce)?;
 
-        lock::lock_sessions(conn).await
+        lock::lock_sessions(conn).await?;
+        Ok(key)
     }
 
     /// Streamed line-by-line `switch-to-configuration` output. The agent owns
@@ -151,12 +159,28 @@ mod tests {
         let msg = encoding::activation_message(STORE, &nonce);
         let sig = sign_activation(&sk, STORE, &nonce);
 
-        assert!(t.authorize(&msg, &sig, &nonce).is_ok());
+        let key = t.authorize(&msg, &sig, &nonce).expect("valid pair authorizes");
+        assert_eq!(key, hex::encode(sk.verifying_key().to_bytes()));
         // Replaying the same signature no longer authorizes: the nonce is burned.
         assert!(matches!(
             t.authorize(&msg, &sig, &nonce),
             Err(Error::NotAuthorized(_))
         ));
+    }
+
+    /// The reported key is the one that actually verified, not merely the first
+    /// key in the trusted set.
+    #[test]
+    fn authorize_names_the_key_that_verified() {
+        let signer = SigningKey::from_bytes(&[9u8; 32]);
+        let other = signing_key();
+        let t = Trigger::new(vec![other.verifying_key(), signer.verifying_key()]);
+        let nonce = t.nonces.issue().unwrap();
+        let msg = encoding::activation_message(STORE, &nonce);
+        let sig = sign_activation(&signer, STORE, &nonce);
+
+        let key = t.authorize(&msg, &sig, &nonce).unwrap();
+        assert_eq!(key, hex::encode(signer.verifying_key().to_bytes()));
     }
 
     #[test]
@@ -182,7 +206,10 @@ mod tests {
         let msg = encoding::lock_message(&nonce);
         let sig = sign_lock(&sk, &nonce);
 
-        assert!(t.authorize(&msg, &sig, &nonce).is_ok());
+        assert_eq!(
+            t.authorize(&msg, &sig, &nonce).unwrap(),
+            hex::encode(sk.verifying_key().to_bytes())
+        );
         assert!(matches!(
             t.authorize(&msg, &sig, &nonce),
             Err(Error::NotAuthorized(_))

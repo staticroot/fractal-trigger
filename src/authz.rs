@@ -9,10 +9,16 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use crate::error::Error;
 
 /// Verify that `signature` (hex, 64 bytes) is valid over `message` under at
-/// least one trusted key. `verify_strict` rejects malleable and small-order
-/// signatures. The domain separation that keeps an activation signature from
-/// authorizing a lock (or vice versa) lives in `message`, not here.
-pub fn verify(keys: &[VerifyingKey], message: &[u8], signature: &str) -> Result<(), Error> {
+/// least one trusted key, and return the key that did. `verify_strict` rejects
+/// malleable and small-order signatures. The domain separation that keeps an
+/// activation signature from authorizing a lock (or vice versa) lives in
+/// `message`, not here.
+///
+/// Returning the key rather than a unit is what lets the caller record which
+/// authority stood behind an action. It is not a condition on whether to act,
+/// so the checklist is unchanged: the first key that verifies wins, exactly as
+/// before.
+pub fn verify(keys: &[VerifyingKey], message: &[u8], signature: &str) -> Result<VerifyingKey, Error> {
     let sig_bytes = hex::decode(signature)
         .map_err(|_| Error::NotAuthorized("signature is not valid hex".to_string()))?;
     let sig = Signature::from_slice(&sig_bytes)
@@ -20,7 +26,7 @@ pub fn verify(keys: &[VerifyingKey], message: &[u8], signature: &str) -> Result<
 
     for key in keys {
         if key.verify_strict(message, &sig).is_ok() {
-            return Ok(());
+            return Ok(*key);
         }
     }
     Err(Error::NotAuthorized(
@@ -35,7 +41,7 @@ mod tests {
 
     use crate::encoding;
 
-    // Frozen KAT, mirrored in fractal-signer so signer and verifier can't drift.
+    // Frozen KAT, mirrored in fractal-lawyer so signer and verifier can't drift.
     const KAT_SEED: [u8; 32] = [7u8; 32];
     const KAT_STORE: &str = "/nix/store/00000000000000000000000000000000-x";
     const KAT_NONCE: &str = "deadbeef";
