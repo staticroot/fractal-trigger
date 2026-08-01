@@ -1,5 +1,5 @@
 {
-  description = "fractal-trigger — minimal root-privileged D-Bus executor for Fractal Linux";
+  description = "fractal-trigger, minimal root-privileged D-Bus executor for Fractal Linux";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
